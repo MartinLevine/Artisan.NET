@@ -1,3 +1,10 @@
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
 .DS_Store
-.idea
+
+# IDE
 .vscode
+.idea

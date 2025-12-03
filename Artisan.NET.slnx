@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Artisan\Artisan.csproj" />
+  <Project Path="ProCode.Hosting/ProCode.Hosting.csproj" />
+</Solution>

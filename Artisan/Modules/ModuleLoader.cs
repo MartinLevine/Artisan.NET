@@ -1,393 +1,196 @@
 using System.Reflection;
-using Artisan.Application;
-using Artisan.Configuration;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
+using Artisan.Attributes;
+using Artisan.Modules;
 
-namespace Artisan.Modules;
+namespace Artisan.Core.Modules;
 
-/// <summary>
-/// 模块加载器 - 自动发现模块并基于程序集引用推导依赖关系
-/// </summary>
 public class ModuleLoader
 {
-    // 缓存：程序集 -> 该程序集中的模块类型
-    private readonly Dictionary<Assembly, Type?> _assemblyModuleCache = new();
+    private readonly IReadOnlyCollection<Type> _disabledModules;
 
-    // 依赖图：模块类型 -> 依赖的模块类型列表
-    private readonly Dictionary<Type, List<Type>> _dependencyGraph = new();
-
-    // 框架配置选项
-    private ArtisanOptions _options = new();
-
-    /// <summary>
-    /// 加载所有模块（自动发现 + 程序集引用推导）
-    /// </summary>
-    public List<ArtisanModule> LoadModules(
-        Assembly entryAssembly,
-        IServiceCollection services,
-        IConfiguration configuration,
-        ArtisanOptions? options = null)
+    public ModuleLoader(IReadOnlyCollection<Type> disabledModules)
     {
-        _options = options ?? new ArtisanOptions();
-        _assemblyModuleCache.Clear();
-        _dependencyGraph.Clear();
-
-        // 1. 递归扫描所有引用的程序集，发现所有模块
-        var allModuleTypes = FindAllModulesInReferencedAssemblies(entryAssembly);
-
-        // 2. 过滤被禁用的模块
-        allModuleTypes = FilterDisabledModules(allModuleTypes);
-
-        // 3. 应用模块替换
-        allModuleTypes = ApplyModuleReplacements(allModuleTypes);
-
-        // 4. 构建隐式依赖图（基于程序集引用关系）
-        BuildImplicitDependencyGraph(allModuleTypes);
-
-        // 5. 添加显式依赖（DependsOn）
-        AddExplicitDependencies(allModuleTypes);
-
-        // 6. 拓扑排序（先按 Level/Order，再按依赖关系）
-        var sortedModuleTypes = TopologicalSort(allModuleTypes);
-
-        // 7. 实例化模块（通过 DI 注入配置类）
-        return InstantiateModules(sortedModuleTypes, services, configuration);
+        _disabledModules = disabledModules ?? new HashSet<Type>();
     }
 
     /// <summary>
-    /// 过滤被禁用的模块
+    /// 加载并排序模块
     /// </summary>
-    private List<Type> FilterDisabledModules(List<Type> moduleTypes)
+    /// <param name="moduleTypes">扫描到的所有模块类型</param>
+    /// <param name="config">配置（用于 ShouldLoad 判断）</param>
+    /// <returns>排序好的模块实例列表</returns>
+    public List<ArtisanModule> LoadModulesFromTypes(IEnumerable<Type> moduleTypes, IConfiguration config)
     {
-        return moduleTypes
-            .Where(t => !_options.IsModuleDisabled(t))
-            .ToList();
-    }
-
-    /// <summary>
-    /// 应用模块替换
-    /// </summary>
-    private List<Type> ApplyModuleReplacements(List<Type> moduleTypes)
-    {
-        var result = new List<Type>();
-
-        foreach (var moduleType in moduleTypes)
+        // 1. 实例化所有模块并初步过滤
+        var nodes = new List<ModuleNode>();
+        
+        foreach (var type in moduleTypes)
         {
-            var replacement = _options.GetModuleReplacement(moduleType);
-            if (replacement != null)
+            // A. 检查黑名单
+            if (_disabledModules.Contains(type)) continue;
+
+            // B. 实例化
+            // 这里支持模块通过构造函数注入 IConfiguration
+            var instance = CreateModuleInstance(type, config);
+
+            // C. 检查条件加载 (ShouldLoad)
+            if (instance != null && instance.ShouldLoad(config))
             {
-                // 使用替换模块，但只添加一次
-                if (!result.Contains(replacement))
-                {
-                    result.Add(replacement);
-                }
-            }
-            else
-            {
-                result.Add(moduleType);
+                var attr = type.GetCustomAttribute<ModuleAttribute>() ?? new ModuleAttribute();
+                nodes.Add(new ModuleNode(type, instance, attr));
             }
         }
 
-        // 添加替换模块中那些不在原列表中的模块（新增的替换模块）
-        foreach (var replacement in _options.ModuleReplacements.Values)
-        {
-            if (!result.Contains(replacement))
-            {
-                result.Add(replacement);
-            }
-        }
+        // 2. 构建依赖图 (显式 + 隐式)
+        BuildDependencyGraph(nodes);
 
-        return result;
+        // 3. 拓扑排序
+        try
+        {
+            return SortByDependency(nodes);
+        }
+        catch (CircularDependencyException ex)
+        {
+            // 这里抛出更友好的错误信息，帮助用户排查
+            throw new InvalidOperationException($"Module loading failed due to circular dependency: {ex.Message}", ex);
+        }
     }
 
-    /// <summary>
-    /// 递归扫描所有引用的程序集，找到所有包含 ArtisanModule 的模块
-    /// </summary>
-    private List<Type> FindAllModulesInReferencedAssemblies(Assembly entryAssembly)
-    {
-        var allModules = new List<Type>();
-        var visitedAssemblies = new HashSet<string>();
-        var assemblyQueue = new Queue<Assembly>();
-
-        assemblyQueue.Enqueue(entryAssembly);
-
-        while (assemblyQueue.Count > 0)
-        {
-            var assembly = assemblyQueue.Dequeue();
-            var assemblyName = assembly.GetName().Name;
-
-            if (assemblyName == null || visitedAssemblies.Contains(assemblyName))
-                continue;
-
-            visitedAssemblies.Add(assemblyName);
-
-            // 跳过系统程序集
-            if (IsSystemAssembly(assemblyName))
-                continue;
-
-            // 查找该程序集中的模块
-            var moduleTypes = FindModulesInAssembly(assembly);
-            foreach (var moduleType in moduleTypes)
-            {
-                allModules.Add(moduleType);
-                _assemblyModuleCache[assembly] = moduleType;
-            }
-
-            // 递归扫描引用的程序集
-            foreach (var referencedAssemblyName in assembly.GetReferencedAssemblies())
-            {
-                if (IsSystemAssembly(referencedAssemblyName.Name))
-                    continue;
-
-                try
-                {
-                    var referencedAssembly = Assembly.Load(referencedAssemblyName);
-                    assemblyQueue.Enqueue(referencedAssembly);
-                }
-                catch (Exception)
-                {
-                    // 忽略无法加载的程序集
-                }
-            }
-        }
-
-        return allModules;
-    }
-
-    /// <summary>
-    /// 在程序集中查找所有 ArtisanModule 子类
-    /// </summary>
-    private List<Type> FindModulesInAssembly(Assembly assembly)
+    private ArtisanModule? CreateModuleInstance(Type type, IConfiguration config)
     {
         try
         {
-            return assembly.GetTypes()
-                .Where(t =>
-                    t.IsClass &&
-                    !t.IsAbstract &&
-                    typeof(ArtisanModule).IsAssignableFrom(t))
-                .ToList();
+            // 简单支持构造函数注入 IConfiguration
+            // 如果构造函数需要 IConfiguration，则注入；否则调用无参构造
+            var ctorWithConfig = type.GetConstructor(new[] { typeof(IConfiguration) });
+            if (ctorWithConfig != null)
+            {
+                return (ArtisanModule)ctorWithConfig.Invoke(new object[] { config });
+            }
+
+            return (ArtisanModule?)Activator.CreateInstance(type);
         }
-        catch (ReflectionTypeLoadException ex)
+        catch (Exception ex)
         {
-            // 处理类型加载异常，只返回能加载的类型
-            return ex.Types
-                .Where(t => t != null &&
-                            t.IsClass &&
-                            !t.IsAbstract &&
-                            typeof(ArtisanModule).IsAssignableFrom(t))
-                .Select(t => t!)
-                .ToList();
+            throw new InvalidOperationException($"Failed to instantiate module '{type.FullName}'. Ensure it has a public parameterless constructor or one accepting IConfiguration.", ex);
         }
     }
 
-    /// <summary>
-    /// 基于程序集引用关系构建隐式依赖图
-    /// 如果程序集 A 引用了程序集 B，且两者都有模块，则 ModuleA 依赖 ModuleB
-    /// </summary>
-    private void BuildImplicitDependencyGraph(List<Type> allModuleTypes)
+    private void BuildDependencyGraph(List<ModuleNode> nodes)
     {
-        // 初始化依赖图
-        foreach (var moduleType in allModuleTypes)
-        {
-            _dependencyGraph[moduleType] = new List<Type>();
-        }
+        // 创建快速查找字典
+        var typeToNodeMap = nodes.ToDictionary(n => n.Type, n => n);
 
-        // 构建程序集到模块的映射
-        var assemblyToModules = new Dictionary<Assembly, List<Type>>();
-        foreach (var moduleType in allModuleTypes)
+        foreach (var dependentNode in nodes)
         {
-            if (!assemblyToModules.ContainsKey(moduleType.Assembly))
+            // A. 处理显式依赖 [DependsOn]
+            foreach (var dependencyType in dependentNode.Attribute.DependsOn)
             {
-                assemblyToModules[moduleType.Assembly] = new List<Type>();
-            }
-            assemblyToModules[moduleType.Assembly].Add(moduleType);
-        }
-
-        // 遍历每个模块，检查其程序集引用
-        foreach (var moduleType in allModuleTypes)
-        {
-            var assembly = moduleType.Assembly;
-
-            foreach (var referencedAssemblyName in assembly.GetReferencedAssemblies())
-            {
-                try
+                if (typeToNodeMap.TryGetValue(dependencyType, out var dependencyNode))
                 {
-                    var referencedAssembly = Assembly.Load(referencedAssemblyName);
-
-                    // 如果被引用的程序集也有模块，建立隐式依赖
-                    if (assemblyToModules.TryGetValue(referencedAssembly, out var referencedModules))
-                    {
-                        foreach (var referencedModule in referencedModules)
-                        {
-                            if (!_dependencyGraph[moduleType].Contains(referencedModule))
-                            {
-                                _dependencyGraph[moduleType].Add(referencedModule);
-                            }
-                        }
-                    }
+                    dependentNode.Dependencies.Add(dependencyNode);
                 }
-                catch (Exception)
+            }
+
+            // B. 处理隐式依赖 (程序集引用推导)
+            // 逻辑：如果 ModuleA 所在的程序集引用了 ModuleB 所在的程序集，则 A 依赖 B
+            var referencedAssemblyNames = dependentNode.Type.Assembly.GetReferencedAssemblies()
+                .Select(a => a.Name)
+                .ToHashSet();
+
+            foreach (var potentialDependency in nodes)
+            {
+                // 跳过自己
+                if (potentialDependency == dependentNode) continue;
+
+                // 如果 potentialDependency 已经在显式依赖里了，跳过
+                if (dependentNode.Dependencies.Contains(potentialDependency)) continue;
+
+                var depAssemblyName = potentialDependency.Type.Assembly.GetName().Name;
+                
+                // 如果存在物理引用关系，建立逻辑依赖
+                if (depAssemblyName != null && referencedAssemblyNames.Contains(depAssemblyName))
                 {
-                    // 忽略无法加载的程序集
+                    dependentNode.Dependencies.Add(potentialDependency);
                 }
             }
         }
     }
 
-    /// <summary>
-    /// 添加显式依赖（通过 DependsOn 声明）
-    /// </summary>
-    private void AddExplicitDependencies(List<Type> allModuleTypes)
+    private List<ArtisanModule> SortByDependency(List<ModuleNode> nodes)
     {
-        foreach (var moduleType in allModuleTypes)
-        {
-            var moduleAttr = moduleType.GetCustomAttribute<ModuleAttribute>();
-            if (moduleAttr?.DependsOn != null)
-            {
-                foreach (var dependency in moduleAttr.DependsOn)
-                {
-                    if (_dependencyGraph.ContainsKey(moduleType) &&
-                        _dependencyGraph.ContainsKey(dependency) &&
-                        !_dependencyGraph[moduleType].Contains(dependency))
-                    {
-                        _dependencyGraph[moduleType].Add(dependency);
-                    }
-                }
-            }
-        }
-    }
+        var sorted = new List<ArtisanModule>();
+        var visited = new HashSet<ModuleNode>();
+        var visiting = new HashSet<ModuleNode>();
 
-    /// <summary>
-    /// 拓扑排序：先按 Level/Order 分组，再按依赖关系排序
-    /// </summary>
-    private List<Type> TopologicalSort(List<Type> allModuleTypes)
-    {
-        // 按 Level 和 Order 排序
-        var sortedByLevel = allModuleTypes
-            .Select(t => new
-            {
-                Type = t,
-                Attr = t.GetCustomAttribute<ModuleAttribute>() ?? new ModuleAttribute()
-            })
-            .OrderBy(x => (int)x.Attr.Level)
-            .ThenBy(x => x.Attr.Order)
-            .Select(x => x.Type)
+        // 技巧：在进行拓扑排序前，先按 Level 和 Order 对入口节点进行预排序。
+        // 这样在没有依赖关系的情况下，DFS 会按照我们期望的优先级顺序访问节点。
+        // OrderBy 是升序：Kernel(0) -> Application(20)
+        var preSortedNodes = nodes
+            .OrderBy(n => n.Attribute.Level)
+            .ThenBy(n => n.Attribute.Order)
             .ToList();
 
-        // 在同 Level 内进行拓扑排序
-        var result = new List<Type>();
-        var visited = new HashSet<Type>();
-        var visiting = new HashSet<Type>();
-
-        foreach (var moduleType in sortedByLevel)
+        foreach (var node in preSortedNodes)
         {
-            TopologicalSortVisit(moduleType, result, visited, visiting);
+            Visit(node, sorted, visited, visiting);
         }
 
-        return result;
+        return sorted;
     }
 
-    private void TopologicalSortVisit(
-        Type moduleType,
-        List<Type> result,
-        HashSet<Type> visited,
-        HashSet<Type> visiting)
+    private void Visit(ModuleNode node, List<ArtisanModule> sorted, HashSet<ModuleNode> visited, HashSet<ModuleNode> visiting)
     {
-        if (visited.Contains(moduleType))
-            return;
+        if (visited.Contains(node)) return;
 
-        if (visiting.Contains(moduleType))
+        if (visiting.Contains(node))
         {
-            // 检测到循环依赖
-            throw new CircularDependencyException(visiting.Append(moduleType).ToArray());
+            // 发现循环依赖
+            // 为了展示闭环，我们简单抛出异常
+            throw new CircularDependencyException($"Circular dependency detected involving {node.Type.Name}");
         }
 
-        visiting.Add(moduleType);
+        visiting.Add(node);
 
-        // 先访问依赖
-        if (_dependencyGraph.TryGetValue(moduleType, out var dependencies))
+        // 递归访问所有依赖项 (先加载依赖)
+        // 这里也对依赖项进行预排序，保证同级依赖按 Order 加载
+        var sortedDependencies = node.Dependencies
+            .OrderBy(n => n.Attribute.Level)
+            .ThenBy(n => n.Attribute.Order);
+
+        foreach (var dep in sortedDependencies)
         {
-            foreach (var dependency in dependencies)
-            {
-                TopologicalSortVisit(dependency, result, visited, visiting);
-            }
+            Visit(dep, sorted, visited, visiting);
         }
 
-        visiting.Remove(moduleType);
-        visited.Add(moduleType);
-        result.Add(moduleType);
+        visiting.Remove(node);
+        visited.Add(node);
+
+        // 只有当依赖都处理完了，才把自己加入列表
+        sorted.Add(node.Instance);
     }
 
     /// <summary>
-    /// 实例化所有模块
+    /// 内部类：用于封装排序过程中的元数据
     /// </summary>
-    private List<ArtisanModule> InstantiateModules(
-        List<Type> sortedModuleTypes,
-        IServiceCollection services,
-        IConfiguration configuration)
+    private class ModuleNode
     {
-        var modules = new List<ArtisanModule>();
-        var tempServiceProvider = BuildTempServiceProvider(services, configuration);
+        public Type Type { get; }
+        public ArtisanModule Instance { get; }
+        public ModuleAttribute Attribute { get; }
+        public List<ModuleNode> Dependencies { get; } = new();
 
-        foreach (var moduleType in sortedModuleTypes)
+        public ModuleNode(Type type, ArtisanModule instance, ModuleAttribute attribute)
         {
-            var module = (ArtisanModule)ActivatorUtilities.CreateInstance(tempServiceProvider, moduleType);
-            modules.Add(module);
-        }
-
-        return modules;
-    }
-
-    private IServiceProvider BuildTempServiceProvider(IServiceCollection services, IConfiguration configuration)
-    {
-        var tempServices = new ServiceCollection();
-        tempServices.AddSingleton(configuration);
-        RegisterAppSettings(tempServices, configuration);
-        return tempServices.BuildServiceProvider();
-    }
-
-    private void RegisterAppSettings(IServiceCollection services, IConfiguration configuration)
-    {
-        var assemblies = AppDomain.CurrentDomain.GetAssemblies();
-        foreach (var assembly in assemblies)
-        {
-            try
-            {
-                foreach (var type in assembly.GetTypes())
-                {
-                    var appSettingAttr = type.GetCustomAttribute<AppSettingAttribute>();
-                    if (appSettingAttr != null)
-                    {
-                        var section = configuration.GetSection(appSettingAttr.Section);
-                        var instance = section.Get(type) ?? Activator.CreateInstance(type);
-                        if (instance != null)
-                        {
-                            services.AddSingleton(type, instance);
-                        }
-                    }
-                }
-            }
-            catch (ReflectionTypeLoadException)
-            {
-                // 忽略无法加载的程序集
-            }
+            Type = type;
+            Instance = instance;
+            Attribute = attribute;
         }
     }
+}
 
-    /// <summary>
-    /// 判断是否为系统程序集（跳过扫描）
-    /// </summary>
-    private static bool IsSystemAssembly(string? assemblyName)
-    {
-        if (string.IsNullOrEmpty(assemblyName))
-            return true;
-
-        return assemblyName.StartsWith("System", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("netstandard", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("mscorlib", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("WindowsBase", StringComparison.OrdinalIgnoreCase);
-    }
+public class CircularDependencyException : Exception
+{
+    public CircularDependencyException(string message) : base(message) { }
 }

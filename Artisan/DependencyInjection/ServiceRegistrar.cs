@@ -1,257 +1,105 @@
 using System.Reflection;
 using Artisan.Attributes;
-using Artisan.Configuration;
-using Artisan.Session;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Artisan.DependencyInjection;
 
-/// <summary>
-/// 服务注册器
-/// 负责扫描并注册所有标记了 DI 相关特性的类型
-/// </summary>
 public static class ServiceRegistrar
 {
     /// <summary>
-    /// 注册所有扫描到的服务
+    /// 注册扫描到的所有服务类型
     /// </summary>
-    public static void RegisterServices(
-        IServiceCollection services,
-        IEnumerable<Type> scannedTypes,
-        IConfiguration configuration)
+    public static void RegisterTypes(IServiceCollection services, IEnumerable<Type> types)
     {
-        // 检查是否需要添加 Session 支持
-        var hasSessionScoped = scannedTypes.Any(t =>
-            t.GetCustomAttribute<ComponentAttribute>()?.SessionScoped == true);
-
-        if (hasSessionScoped)
+        foreach (var type in types)
         {
-            services.AddSessionLifetime();
-        }
+            // 双重检查：确保是类且不抽象 (虽然 Scanner 可能已经过滤过)
+            if (!type.IsClass || type.IsAbstract) continue;
 
-        foreach (var type in scannedTypes)
-        {
-            // 注册 [Injectable], [Service], [Repository], [Component] 标记的类
-            var injectableAttr = type.GetCustomAttribute<InjectableAttribute>();
-            if (injectableAttr != null)
-            {
-                // 检查是否是 Session 作用域
-                var componentAttr = type.GetCustomAttribute<ComponentAttribute>();
-                if (componentAttr?.SessionScoped == true)
-                {
-                    RegisterSessionScopedType(services, type);
-                }
-                else
-                {
-                    RegisterInjectableType(services, type, injectableAttr);
-                }
-            }
+            var attr = type.GetCustomAttribute<InjectableAttribute>();
+            if (attr == null) continue;
 
-            // 注册 [DynamicInjectable] 标记的方法
-            RegisterDynamicInjectables(services, type, configuration);
+            RegisterType(services, type, attr);
         }
     }
 
-    /// <summary>
-    /// 注册 Session 作用域类型
-    /// </summary>
-    private static void RegisterSessionScopedType(
-        IServiceCollection services,
-        Type implementationType)
+    private static void RegisterType(IServiceCollection services, Type implementationType, InjectableAttribute attr)
     {
+        var lifetime = ConvertLifetime(attr.Lifetime);
+        var serviceKey = attr.Key; // 支持 Keyed Service
+
+        // 1. 查找该类实现的所有有效接口
+        // 过滤掉 System 接口 (IDisposable 等)
         var interfaces = implementationType.GetInterfaces()
-            .Where(i => !i.Namespace?.StartsWith("System") == true)
-            .ToList();
+            .Where(i => !IsSystemInterface(i))
+            .ToArray();
 
-        if (interfaces.Any())
+        // 2. 处理开放泛型 (Open Generics)
+        // 例如: public class Repository<T> : IRepository<T>
+        if (implementationType.IsGenericTypeDefinition)
         {
-            foreach (var iface in interfaces)
+            // 泛型无法使用 Factory 转发，只能直接注册 Interface -> Implementation
+            if (serviceKey != null)
             {
-                SessionServiceRegistrar.RegisterSessionService(services, iface, implementationType);
-            }
-        }
-
-        // 同时注册实现类本身
-        SessionServiceRegistrar.RegisterSessionService(services, implementationType, implementationType);
-    }
-
-    /// <summary>
-    /// 注册可注入类型
-    /// </summary>
-    private static void RegisterInjectableType(
-        IServiceCollection services,
-        Type implementationType,
-        InjectableAttribute attribute)
-    {
-        var lifetime = ConvertLifetime(attribute.Lifetime);
-        var interfaces = implementationType.GetInterfaces()
-            .Where(i => !i.Namespace?.StartsWith("System") == true)
-            .ToList();
-
-        // 检查是否需要属性注入
-        var needsPropertyInjection = NeedsPropertyInjection(implementationType);
-
-        if (attribute.Key != null)
-        {
-            // Keyed 服务注册
-            if (interfaces.Any())
-            {
-                foreach (var iface in interfaces)
+                // Keyed Open Generic
+                services.TryAddKeyed(
+                    new ServiceDescriptor(implementationType, serviceKey, implementationType, lifetime));
+                foreach (var i in interfaces)
                 {
-                    if (needsPropertyInjection)
-                    {
-                        services.Add(new ServiceDescriptor(
-                            iface,
-                            attribute.Key,
-                            (sp, key) => CreateInstanceWithPropertyInjection(sp, implementationType),
-                            lifetime));
-                    }
-                    else
-                    {
-                        services.Add(new ServiceDescriptor(
-                            iface,
-                            attribute.Key,
-                            implementationType,
-                            lifetime));
-                    }
+                    services.TryAddKeyed(new ServiceDescriptor(i, serviceKey, implementationType, lifetime));
                 }
             }
             else
             {
-                if (needsPropertyInjection)
+                // Normal Open Generic
+                services.TryAdd(new ServiceDescriptor(implementationType, implementationType, lifetime));
+                foreach (var i in interfaces)
                 {
-                    services.Add(new ServiceDescriptor(
-                        implementationType,
-                        attribute.Key,
-                        (sp, key) => CreateInstanceWithPropertyInjection(sp, implementationType),
-                        lifetime));
-                }
-                else
-                {
-                    services.Add(new ServiceDescriptor(
-                        implementationType,
-                        attribute.Key,
-                        implementationType,
-                        lifetime));
-                }
-            }
-        }
-        else
-        {
-            // 普通服务注册
-            if (interfaces.Any())
-            {
-                foreach (var iface in interfaces)
-                {
-                    if (needsPropertyInjection)
-                    {
-                        services.Add(new ServiceDescriptor(
-                            iface,
-                            sp => CreateInstanceWithPropertyInjection(sp, implementationType),
-                            lifetime));
-                    }
-                    else
-                    {
-                        services.Add(new ServiceDescriptor(iface, implementationType, lifetime));
-                    }
+                    services.TryAdd(new ServiceDescriptor(i, implementationType, lifetime));
                 }
             }
 
-            // 同时注册实现类本身
-            if (needsPropertyInjection)
+            return;
+        }
+
+        // 3. 处理普通类型 (Closed Types)
+        // 核心策略：先注册自身 (Implementation)，再把接口指向自身 (Forwarding)
+        // 这样保证 Singleton 模式下，注入接口和注入自身拿到的是同一个实例
+
+        // A. 注册自身: Service -> Service
+        if (serviceKey != null)
+        {
+            services.TryAddKeyed(new ServiceDescriptor(implementationType, serviceKey, implementationType, lifetime));
+        }
+        else
+        {
+            services.TryAdd(new ServiceDescriptor(implementationType, implementationType, lifetime));
+        }
+
+        // B. 注册接口: IService -> Service (通过转发)
+        foreach (var interfaceType in interfaces)
+        {
+            if (serviceKey != null)
             {
-                services.Add(new ServiceDescriptor(
-                    implementationType,
-                    sp => CreateInstanceWithPropertyInjection(sp, implementationType),
+                // Keyed Service Forwarding
+                services.TryAddKeyed(new ServiceDescriptor(
+                    interfaceType,
+                    serviceKey,
+                    (sp, key) => sp.GetRequiredKeyedService(implementationType, key),
                     lifetime));
             }
             else
             {
-                services.Add(new ServiceDescriptor(implementationType, implementationType, lifetime));
+                // Normal Service Forwarding
+                services.TryAdd(new ServiceDescriptor(
+                    interfaceType,
+                    sp => sp.GetRequiredService(implementationType),
+                    lifetime));
             }
         }
     }
 
-    /// <summary>
-    /// 检查类型是否需要属性注入
-    /// </summary>
-    private static bool NeedsPropertyInjection(Type type)
-    {
-        var bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-
-        // 检查是否有 [Inject] 标记的属性或字段
-        var hasInject = type.GetProperties(bindingFlags)
-            .Any(p => p.GetCustomAttribute<InjectAttribute>() != null)
-            || type.GetFields(bindingFlags)
-            .Any(f => f.GetCustomAttribute<InjectAttribute>() != null);
-
-        // 检查是否有 [AppSetting] 标记的属性
-        var hasAppSetting = type.GetProperties(bindingFlags)
-            .Any(p => p.GetCustomAttribute<AppSettingAttribute>() != null);
-
-        // 检查是否有 [GetValue] 标记的属性或字段
-        var hasGetValue = type.GetProperties(bindingFlags)
-            .Any(p => p.GetCustomAttribute<GetValueAttribute>() != null)
-            || type.GetFields(bindingFlags)
-            .Any(f => f.GetCustomAttribute<GetValueAttribute>() != null);
-
-        return hasInject || hasAppSetting || hasGetValue;
-    }
-
-    /// <summary>
-    /// 创建实例并进行属性注入
-    /// </summary>
-    private static object CreateInstanceWithPropertyInjection(IServiceProvider sp, Type implementationType)
-    {
-        var instance = ActivatorUtilities.CreateInstance(sp, implementationType);
-        var injector = sp.GetService<IPropertyInjector>();
-        injector?.InjectProperties(instance);
-        return instance;
-    }
-
-    /// <summary>
-    /// 注册动态可注入方法
-    /// </summary>
-    private static void RegisterDynamicInjectables(
-        IServiceCollection services,
-        Type type,
-        IConfiguration configuration)
-    {
-        var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-            .Where(m => m.GetCustomAttribute<DynamicInjectableAttribute>() != null);
-
-        foreach (var method in methods)
-        {
-            var attr = method.GetCustomAttribute<DynamicInjectableAttribute>()!;
-            var returnType = method.ReturnType;
-            var lifetime = ConvertLifetime(attr.Lifetime);
-
-            // 创建工厂函数
-            Func<IServiceProvider, object> factory = sp =>
-            {
-                // 获取包含该方法的实例
-                var instance = ActivatorUtilities.CreateInstance(sp, type);
-
-                // 调用方法获取返回值
-                return method.Invoke(instance, null)!;
-            };
-
-            if (attr.Key != null)
-            {
-                // Keyed 服务
-                services.Add(new ServiceDescriptor(returnType, attr.Key, (sp, key) => factory(sp), lifetime));
-            }
-            else
-            {
-                services.Add(new ServiceDescriptor(returnType, factory, lifetime));
-            }
-        }
-    }
-
-    /// <summary>
-    /// 转换生命周期枚举
-    /// </summary>
     private static ServiceLifetime ConvertLifetime(Lifetime lifetime)
     {
         return lifetime switch
@@ -261,5 +109,39 @@ public static class ServiceRegistrar
             Lifetime.Singleton => ServiceLifetime.Singleton,
             _ => ServiceLifetime.Scoped
         };
+    }
+
+    /// <summary>
+    /// 过滤系统接口，避免把 IDisposable, ISerializable 等注册进 DI
+    /// </summary>
+    private static bool IsSystemInterface(Type type)
+    {
+        if (type.Namespace == null) return false;
+
+        return type.Namespace.StartsWith("System")
+               || type.Namespace.StartsWith("Microsoft");
+    }
+
+    /// <summary>
+    /// 安全添加 Keyed Service (如果已存在 Type + Key 的组合则跳过)
+    /// </summary>
+    public static void TryAddKeyed(this IServiceCollection services, ServiceDescriptor descriptor)
+    {
+        // 1. 检查 descriptor 是否真的是 Keyed (以防万一)
+        if (!descriptor.IsKeyedService)
+        {
+            services.TryAdd(descriptor);
+            return;
+        }
+
+        // 2. 核心查重逻辑：检查是否存在 ServiceType 和 ServiceKey 都相同的描述符
+        var exists = services.Any(d =>
+            d.ServiceType == descriptor.ServiceType &&
+            object.Equals(d.ServiceKey, descriptor.ServiceKey));
+
+        if (!exists)
+        {
+            services.Add(descriptor);
+        }
     }
 }
