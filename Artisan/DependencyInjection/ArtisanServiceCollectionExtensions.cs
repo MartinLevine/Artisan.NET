@@ -1,4 +1,6 @@
+using Artisan.AspNetCore;
 using Artisan.Configuration;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -25,6 +27,12 @@ public static class ArtisanServiceCollectionExtensions
 
         // 注册 AssemblyScanner 作为单例
         services.AddSingleton<IAssemblyScanner>(scanner);
+
+        // 注册属性注入器
+        services.AddPropertyInjector();
+
+        // 注册自定义 Controller 激活器以支持属性注入
+        services.AddSingleton<IControllerActivator, ArtisanControllerActivator>();
 
         return services;
     }

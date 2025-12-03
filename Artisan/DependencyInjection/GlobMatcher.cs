@@ -1,10 +1,10 @@
-using System.Text.RegularExpressions;
+using Microsoft.Extensions.FileSystemGlobbing;
 
 namespace Artisan.DependencyInjection;
 
 /// <summary>
 /// Glob 模式匹配器
-/// 支持命名空间的通配符匹配
+/// 使用 Microsoft.Extensions.FileSystemGlobbing 库实现
 /// </summary>
 public static class GlobMatcher
 {
@@ -16,8 +16,8 @@ public static class GlobMatcher
     /// <returns>是否匹配</returns>
     /// <remarks>
     /// 支持的通配符：
-    /// *     - 匹配任意字符（不含点）
-    /// **    - 匹配任意字符（含点）
+    /// *     - 匹配任意字符（不含分隔符）
+    /// **    - 匹配任意字符（含分隔符），可匹配零个或多个段
     /// ?     - 匹配单个字符
     /// [abc] - 匹配字符集
     /// </remarks>
@@ -26,74 +26,19 @@ public static class GlobMatcher
         if (string.IsNullOrEmpty(pattern) || string.IsNullOrEmpty(name))
             return false;
 
-        var regexPattern = ConvertToRegex(pattern);
-        return Regex.IsMatch(name, regexPattern, RegexOptions.IgnoreCase);
-    }
-
-    /// <summary>
-    /// 将 Glob 模式转换为正则表达式
-    /// </summary>
-    private static string ConvertToRegex(string pattern)
-    {
-        var regex = new System.Text.StringBuilder();
-        regex.Append('^');
-
-        for (int i = 0; i < pattern.Length; i++)
+        try
         {
-            char c = pattern[i];
+            var matcher = new Matcher(StringComparison.OrdinalIgnoreCase);
+            matcher.AddInclude(pattern);
 
-            switch (c)
-            {
-                case '*':
-                    // 检查是否是 **
-                    if (i + 1 < pattern.Length && pattern[i + 1] == '*')
-                    {
-                        regex.Append(".*"); // ** 匹配任意字符（含点）
-                        i++; // 跳过下一个 *
-                    }
-                    else
-                    {
-                        regex.Append("[^.]*"); // * 匹配任意字符（不含点）
-                    }
-                    break;
-
-                case '?':
-                    regex.Append("[^.]"); // ? 匹配单个非点字符
-                    break;
-
-                case '[':
-                    // 字符集直接保留
-                    regex.Append('[');
-                    break;
-
-                case ']':
-                    regex.Append(']');
-                    break;
-
-                case '.':
-                    regex.Append(@"\.");
-                    break;
-
-                case '\\':
-                case '^':
-                case '$':
-                case '|':
-                case '+':
-                case '(':
-                case ')':
-                case '{':
-                case '}':
-                    regex.Append('\\');
-                    regex.Append(c);
-                    break;
-
-                default:
-                    regex.Append(c);
-                    break;
-            }
+            // FileSystemGlobbing 针对路径设计，将程序集名称转换为路径格式
+            // 例如 "ProCode.Hosting" -> "ProCode/Hosting"
+            var pathName = name.Replace(".", "/");
+            return matcher.Match(pathName).HasMatches;
         }
-
-        regex.Append('$');
-        return regex.ToString();
+        catch
+        {
+            return false;
+        }
     }
 }

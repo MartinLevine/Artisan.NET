@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("Artisan.NET - A Spring Boot-like dependency injection framework for .NET")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+4827d6fdd214ec653dd14933455831a4c26bb934")]
 [assembly: System.Reflection.AssemblyProductAttribute("Artisan")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Artisan")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -20,3 +20,4 @@
 /Users/martinlevine/RiderProjects/ProCode-Server/Artisan/obj/Debug/net10.0/refint/Artisan.dll
 /Users/martinlevine/RiderProjects/ProCode-Server/Artisan/obj/Debug/net10.0/Artisan.pdb
 /Users/martinlevine/RiderProjects/ProCode-Server/Artisan/obj/Debug/net10.0/ref/Artisan.dll
+/Users/martinlevine/RiderProjects/ProCode-Server/Artisan/obj/Debug/net10.0/Artisan.sourcelink.json

@@ -89,6 +89,9 @@ public static class ServiceRegistrar
             .Where(i => !i.Namespace?.StartsWith("System") == true)
             .ToList();
 
+        // 检查是否需要属性注入
+        var needsPropertyInjection = NeedsPropertyInjection(implementationType);
+
         if (attribute.Key != null)
         {
             // Keyed 服务注册
@@ -96,20 +99,42 @@ public static class ServiceRegistrar
             {
                 foreach (var iface in interfaces)
                 {
-                    services.Add(new ServiceDescriptor(
-                        iface,
-                        attribute.Key,
-                        implementationType,
-                        lifetime));
+                    if (needsPropertyInjection)
+                    {
+                        services.Add(new ServiceDescriptor(
+                            iface,
+                            attribute.Key,
+                            (sp, key) => CreateInstanceWithPropertyInjection(sp, implementationType),
+                            lifetime));
+                    }
+                    else
+                    {
+                        services.Add(new ServiceDescriptor(
+                            iface,
+                            attribute.Key,
+                            implementationType,
+                            lifetime));
+                    }
                 }
             }
             else
             {
-                services.Add(new ServiceDescriptor(
-                    implementationType,
-                    attribute.Key,
-                    implementationType,
-                    lifetime));
+                if (needsPropertyInjection)
+                {
+                    services.Add(new ServiceDescriptor(
+                        implementationType,
+                        attribute.Key,
+                        (sp, key) => CreateInstanceWithPropertyInjection(sp, implementationType),
+                        lifetime));
+                }
+                else
+                {
+                    services.Add(new ServiceDescriptor(
+                        implementationType,
+                        attribute.Key,
+                        implementationType,
+                        lifetime));
+                }
             }
         }
         else
@@ -119,13 +144,70 @@ public static class ServiceRegistrar
             {
                 foreach (var iface in interfaces)
                 {
-                    services.Add(new ServiceDescriptor(iface, implementationType, lifetime));
+                    if (needsPropertyInjection)
+                    {
+                        services.Add(new ServiceDescriptor(
+                            iface,
+                            sp => CreateInstanceWithPropertyInjection(sp, implementationType),
+                            lifetime));
+                    }
+                    else
+                    {
+                        services.Add(new ServiceDescriptor(iface, implementationType, lifetime));
+                    }
                 }
             }
 
             // 同时注册实现类本身
-            services.Add(new ServiceDescriptor(implementationType, implementationType, lifetime));
+            if (needsPropertyInjection)
+            {
+                services.Add(new ServiceDescriptor(
+                    implementationType,
+                    sp => CreateInstanceWithPropertyInjection(sp, implementationType),
+                    lifetime));
+            }
+            else
+            {
+                services.Add(new ServiceDescriptor(implementationType, implementationType, lifetime));
+            }
         }
+    }
+
+    /// <summary>
+    /// 检查类型是否需要属性注入
+    /// </summary>
+    private static bool NeedsPropertyInjection(Type type)
+    {
+        var bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        // 检查是否有 [Inject] 标记的属性或字段
+        var hasInject = type.GetProperties(bindingFlags)
+            .Any(p => p.GetCustomAttribute<InjectAttribute>() != null)
+            || type.GetFields(bindingFlags)
+            .Any(f => f.GetCustomAttribute<InjectAttribute>() != null);
+
+        // 检查是否有 [AppSetting] 标记的属性
+        var hasAppSetting = type.GetProperties(bindingFlags)
+            .Any(p => p.GetCustomAttribute<AppSettingAttribute>() != null);
+
+        // 检查是否有 [GetValue] 标记的属性或字段
+        var hasGetValue = type.GetProperties(bindingFlags)
+            .Any(p => p.GetCustomAttribute<GetValueAttribute>() != null)
+            || type.GetFields(bindingFlags)
+            .Any(f => f.GetCustomAttribute<GetValueAttribute>() != null);
+
+        return hasInject || hasAppSetting || hasGetValue;
+    }
+
+    /// <summary>
+    /// 创建实例并进行属性注入
+    /// </summary>
+    private static object CreateInstanceWithPropertyInjection(IServiceProvider sp, Type implementationType)
+    {
+        var instance = ActivatorUtilities.CreateInstance(sp, implementationType);
+        var injector = sp.GetService<IPropertyInjector>();
+        injector?.InjectProperties(instance);
+        return instance;
     }
 
     /// <summary>

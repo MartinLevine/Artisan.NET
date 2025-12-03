@@ -3,6 +3,7 @@ using System.Reflection;
 using Artisan.Attributes;
 using Artisan.Configuration;
 using Artisan.DependencyInjection;
+using Artisan.Diagnostics;
 using Artisan.Modules;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -63,6 +64,9 @@ public static class ArtisanApplication
         // 7. 注册服务和配置
         builder.Services.AddArtisanServices(scanner, builder.Configuration);
 
+        // 打印已注册的服务
+        DiagnosticPrinter.PrintRegisteredServices(builder.Services);
+
         // 8. 自动发现所有模块并解析依赖链（基于程序集引用推导）
         var moduleLoader = new ModuleLoader();
         var modules = moduleLoader.LoadModules(
@@ -70,6 +74,9 @@ public static class ArtisanApplication
             builder.Services,
             builder.Configuration,
             artisanOptions);
+
+        // 打印模块树
+        DiagnosticPrinter.PrintModuleTree(modules);
 
         // ==========================================
         // 阶段 2：服务注册（中间执行）
@@ -98,6 +105,9 @@ public static class ArtisanApplication
 
         // 12. 调用用户 Application 的 Configure（最后执行，可覆盖模块配置）
         configurableApp?.Configure(app);
+
+        // 打印 API 端点列表
+        DiagnosticPrinter.PrintApiEndpoints(app);
 
         await app.RunAsync();
     }
@@ -238,12 +248,18 @@ public class ArtisanApplicationBuilder
 
         builder.Services.AddArtisanServices(scanner, builder.Configuration);
 
+        // 打印已注册的服务
+        DiagnosticPrinter.PrintRegisteredServices(builder.Services);
+
         var moduleLoader = new ModuleLoader();
         var modules = moduleLoader.LoadModules(
             entryAssembly,
             builder.Services,
             builder.Configuration,
             _options);
+
+        // 打印模块树
+        DiagnosticPrinter.PrintModuleTree(modules);
 
         // 阶段 2
         foreach (var module in modules)
@@ -262,6 +278,9 @@ public class ArtisanApplicationBuilder
         }
 
         configurableApp?.Configure(app);
+
+        // 打印 API 端点列表
+        DiagnosticPrinter.PrintApiEndpoints(app);
 
         await app.RunAsync();
     }

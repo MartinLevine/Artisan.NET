@@ -5,3 +5,15 @@
       context: .
       dockerfile: api-gateway/Dockerfile
 
+  hosting:
+    image: hosting
+    build:
+      context: .
+      dockerfile: Hosting/Dockerfile
+
+  procode.hosting:
+    image: procode.hosting
+    build:
+      context: .
+      dockerfile: ProCode.Hosting/Dockerfile
+

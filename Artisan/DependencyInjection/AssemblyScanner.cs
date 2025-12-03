@@ -54,6 +54,7 @@ public class AssemblyScanner : IAssemblyScanner
     private void ScanAssemblyRecursive(Assembly assembly, List<string> patterns)
     {
         var assemblyName = assembly.GetName().Name;
+
         if (assemblyName == null || _processedAssemblies.Contains(assemblyName))
             return;
 
@@ -171,18 +172,45 @@ public class AssemblyScanner : IAssemblyScanner
     /// </summary>
     private static string? GetRootNamespace(Assembly assembly)
     {
-        // 尝试从程序集名称推断
+        // 优先从程序集中的类型获取公共命名空间前缀
+        // 这比使用程序集名称更可靠，因为程序集名称可能与命名空间不同
+        // 例如：程序集 "api-gateway" 的命名空间可能是 "api_gateway"
+        try
+        {
+            var namespaces = assembly.GetTypes()
+                .Where(t => !string.IsNullOrEmpty(t.Namespace) && t.IsPublic)
+                .Select(t => t.Namespace!)
+                .Distinct()
+                .ToList();
+
+            if (namespaces.Count > 0)
+            {
+                // 找到最短的公共命名空间前缀
+                var commonPrefix = namespaces
+                    .OrderBy(n => n.Length)
+                    .First()
+                    .Split('.')
+                    .First();
+
+                // 验证这个前缀确实是所有命名空间的公共前缀
+                if (namespaces.All(n => n.StartsWith(commonPrefix, StringComparison.Ordinal)))
+                {
+                    return commonPrefix;
+                }
+
+                // 如果没有公共前缀，返回最短命名空间的第一部分
+                return commonPrefix;
+            }
+        }
+        catch
+        {
+            // 忽略反射异常
+        }
+
+        // 备选方案：使用程序集名称
         var assemblyName = assembly.GetName().Name;
         if (!string.IsNullOrEmpty(assemblyName))
             return assemblyName;
-
-        // 尝试从类型中获取
-        var firstType = assembly.GetTypes().FirstOrDefault(t => !string.IsNullOrEmpty(t.Namespace));
-        if (firstType?.Namespace != null)
-        {
-            var parts = firstType.Namespace.Split('.');
-            return parts[0];
-        }
 
         return null;
     }
