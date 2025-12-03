@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "eIUsdH2rvR4=",
+  "success": true,
+  "projectFilePath": "/Users/martinlevine/RiderProjects/ProCode-Server/api-gateway/api-gateway.csproj",
+  "expectedPackageFiles": [
+    "/Users/martinlevine/.nuget/packages/microsoft.aspnetcore.openapi/10.0.0/microsoft.aspnetcore.openapi.10.0.0.nupkg.sha512",
+    "/Users/martinlevine/.nuget/packages/microsoft.openapi/2.0.0/microsoft.openapi.2.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}
