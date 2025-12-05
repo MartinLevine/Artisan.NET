@@ -22,16 +22,16 @@ public static class LoggerExtensions
         var rows = source.ToList();
         var rowValues = new List<string[]>(rows.Count);
         
-        // 1. 计算每列内容的“纯净”最大宽度 (不含 padding)
-        var contentWidths = new int[columns.Count];
+        // 1. 计算每列内容的“最大视觉宽度”
+        var maxVisualWidths = new int[columns.Count];
 
-        // 先初始化为表头长度
+        // 初始化为表头宽度
         for (int i = 0; i < columns.Count; i++)
         {
-            contentWidths[i] = columns[i].Header.Length;
+            maxVisualWidths[i] = GetVisualWidth(columns[i].Header);
         }
 
-        // 遍历所有数据，更新最大宽度
+        // 遍历数据更新最大宽度
         foreach (var item in rows)
         {
             var values = new string[columns.Count];
@@ -40,52 +40,87 @@ public static class LoggerExtensions
                 var val = columns[i].ValueSelector(item)?.ToString() ?? "";
                 values[i] = val;
                 
-                if (val.Length > contentWidths[i])
+                var width = GetVisualWidth(val);
+                if (width > maxVisualWidths[i])
                 {
-                    contentWidths[i] = val.Length;
+                    maxVisualWidths[i] = width;
                 }
             }
             rowValues.Add(values);
         }
 
         // 2. 生成分割线
-        // 规则：分隔线长度 = 内容宽度 + 2 (左边1空格 + 右边1空格)
-        // 样式：+--------+-------+
         var separatorBuilder = new StringBuilder("+");
-        foreach (var width in contentWidths)
+        foreach (var width in maxVisualWidths)
         {
+            // 内容宽 + 左右各1空格
             separatorBuilder.Append(new string('-', width + 2)).Append('+');
         }
         var separatorLine = separatorBuilder.ToString();
 
-        // 3. 生成行格式字符串
-        // 规则：| {0,-Width} | (注意大括号内外的空格)
-        // 样式：| Method | Route |
-        var rowFormatBuilder = new StringBuilder("|");
+        // 3. 打印逻辑 (不能再用 string.Format 自动对齐了，必须手动拼接)
+        
+        // 打印顶部分割线
+        logger.Log(level, separatorLine);
+        
+        // 打印表头
+        var headerSb = new StringBuilder("|");
         for (int i = 0; i < columns.Count; i++)
         {
-            // {i, -width} 表示：参数i，左对齐，占width位
-            // 我们在占位符前后各手动加一个空格
-            rowFormatBuilder.Append($" {{{i},-{contentWidths[i]}}} |");
+            headerSb.Append(" ");
+            headerSb.Append(PadRightVisual(columns[i].Header, maxVisualWidths[i]));
+            headerSb.Append(" |");
         }
-        var rowFormat = rowFormatBuilder.ToString();
-
-        // 4. 打印
-        logger.Log(level, separatorLine);
+        logger.Log(level, headerSb.ToString());
         
-        // 表头
-        var headerValues = columns.Select(c => c.Header).ToArray();
-        logger.Log(level, string.Format(rowFormat, headerValues));
-        
+        // 打印中间分割线
         logger.Log(level, separatorLine);
 
-        // 数据行
+        // 打印数据行
         foreach (var row in rowValues)
         {
-            logger.Log(level, string.Format(rowFormat, row));
+            var rowSb = new StringBuilder("|");
+            for (int i = 0; i < columns.Count; i++)
+            {
+                rowSb.Append(" ");
+                rowSb.Append(PadRightVisual(row[i], maxVisualWidths[i]));
+                rowSb.Append(" |");
+            }
+            logger.Log(level, rowSb.ToString());
         }
 
+        // 打印底部分割线
         logger.Log(level, separatorLine);
+    }
+
+    /// <summary>
+    /// 获取字符串的视觉宽度 (ASCII=1, 中文=2)
+    /// </summary>
+    private static int GetVisualWidth(string? str)
+    {
+        if (string.IsNullOrEmpty(str)) return 0;
+        
+        int length = 0;
+        foreach (var c in str)
+        {
+            // 简单的判断：ASCII 字符 (0-127) 算 1，其他算 2 (包括中文、全角符号、Emoji等)
+            // 这是一个工程近似值，对于控制台打印足够准确
+            length += (c >= 0 && c <= 127) ? 1 : 2;
+        }
+        return length;
+    }
+
+    /// <summary>
+    /// 基于视觉宽度进行右侧填充
+    /// </summary>
+    private static string PadRightVisual(string str, int totalWidth)
+    {
+        int currentWidth = GetVisualWidth(str);
+        int paddingNeeded = totalWidth - currentWidth;
+        
+        if (paddingNeeded <= 0) return str;
+        
+        return str + new string(' ', paddingNeeded);
     }
 
     public class TableColumnBuilder<T>

@@ -118,9 +118,16 @@ public class ArtisanApplicationV2
         ProcessInjectables();
         ProcessConfigurations();
         ProcessConfigureServices();
-        await RunApplication();
+        await RunApplication(app =>
+        {
+            ProcessEnvLogging(app);
+            ProcessEndpointsLogging(app);
+        });
     }
 
+    /// <summary>
+    /// 处理启动日志
+    /// </summary>
     private void ProcessBootstrapLogging()
     {
         // 1. (可选) 打印一个帅气的 ASCII Banner
@@ -136,6 +143,42 @@ public class ArtisanApplicationV2
         Console.ResetColor();
         Console.WriteLine();
         _logger.LogInformation("Starting Artisan Application...");
+    }
+
+    /// <summary>
+    /// 处理环境日志
+    /// </summary>
+    /// <param name="app">Web Application</param>
+    private void ProcessEnvLogging(WebApplication app)
+    {
+        // 打印输出环境信息
+        var infos = app.GetRuntimeInformation();
+        _logger.LogInformation("Runtime Environment:");
+        _logger.LogTable(infos, table =>
+        {
+            table.AddColumn("Item", x => x.Key)
+                .AddColumn("Value", x => x.Value);
+        });
+    }
+
+    /// <summary>
+    /// 处理API端点日志
+    /// </summary>
+    /// <param name="app">Web Application</param>
+    private void ProcessEndpointsLogging(WebApplication app)
+    {
+        _logger.LogInformation("API endpoints:");
+        var endpoints = app.GetEndpoints();
+        _logger.LogTable(endpoints, table =>
+        {
+            table
+                .AddColumn("Method", x => x.ActionConstraints?
+                    .OfType<HttpMethodActionConstraint>()
+                    .FirstOrDefault()?.HttpMethods.First() ?? "ANY")
+                .AddColumn("Route Pattern", x => x.AttributeRouteInfo?.Template ?? "N/A")
+                .AddColumn("Controller", x => x.ControllerName)
+                .AddColumn("Action", x => x.ActionName);
+        });
     }
 
     /// <summary>
@@ -194,7 +237,7 @@ public class ArtisanApplicationV2
     /// <summary>
     /// 运行App
     /// </summary>
-    private async Task RunApplication()
+    private async Task RunApplication(Action<WebApplication>? beforeRunWebApplication = null)
     {
         _logger.LogInformation("Artisan is building and running web application...");
         var app = _context.Builder.Build();
@@ -207,28 +250,9 @@ public class ArtisanApplicationV2
         {
             module.Configure(app);
         }
-        
-        // 打印输出环境信息
-        var infos = app.GetRuntimeInformation();
-        _logger.LogInformation("Runtime Environment:");
-        _logger.LogTable(infos, table =>
-        {
-            table.AddColumn("Item", x => x.Key)
-                .AddColumn("Value", x => x.Value);
-        });
 
-        _logger.LogInformation("API endpoints:");
-        var endpoints = app.GetEndpoints();
-        _logger.LogTable(endpoints, table =>
-        {
-            table
-                .AddColumn("Method", x => x.ActionConstraints?
-                    .OfType<HttpMethodActionConstraint>()
-                    .FirstOrDefault()?.HttpMethods.First() ?? "ANY")
-                .AddColumn("Route Pattern", x => x.AttributeRouteInfo?.Template ?? "N/A")
-                .AddColumn("Controller", x => x.ControllerName)
-                .AddColumn("Action", x => x.ActionName);
-        });
+        // 处理执行前回调
+        beforeRunWebApplication?.Invoke(app);
 
         await app.RunAsync();
     }

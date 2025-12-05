@@ -1,3 +1,4 @@
+using System.Runtime;
 using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Mvc.Controllers;
@@ -35,16 +36,37 @@ public static class WebApplicationExtensions
     public static IEnumerable<KeyValuePair<string, string>> GetRuntimeInformation(this WebApplication app)
     {
         var process = System.Diagnostics.Process.GetCurrentProcess();
+        var gc = GC.GetGCMemoryInfo();
+        var gcMode = GCSettings.IsServerGC ? "Server" : "Workstation";
+        
+        // 格式化辅助函数
+        string FormatSize(long bytes)
+        {
+            return bytes switch
+            {
+                < 1024 * 1024 => $"{bytes / 1024} KB",
+                < 1024 * 1024 * 1024 => $"{bytes / 1024.0 / 1024.0:F2} MB",
+                _ => $"{bytes / 1024.0 / 1024.0 / 1024.0:F2} GB"
+            };
+        }
+        
         return
         [
+            // === 基础环境 ===
             new KeyValuePair<string, string>("Application", app.Environment.ApplicationName),
             new KeyValuePair<string, string>("Environment", app.Environment.EnvironmentName),
-            new KeyValuePair<string, string>("Content Root", app.Environment.ContentRootPath),
             new KeyValuePair<string, string>("Framework", RuntimeInformation.FrameworkDescription),
             new KeyValuePair<string, string>("OS Platform", RuntimeInformation.OSDescription),
+            new KeyValuePair<string, string>("Timezone", TimeZoneInfo.Local.DisplayName),
+            // === 进程信息 ===
             new KeyValuePair<string, string>("Process ID", process.Id.ToString()),
-            new KeyValuePair<string, string>("Memory Usage", $"{process.WorkingSet64 / 1024 / 1024} MB"),
-            new KeyValuePair<string, string>("Timezone", TimeZoneInfo.Local.DisplayName)
+            new KeyValuePair<string, string>("Content Root", app.Environment.ContentRootPath),
+            // === 内存与 GC 信息 ===
+            new KeyValuePair<string, string>("GC Mode", $"{gcMode}"),
+            new KeyValuePair<string, string>("GC Heap Size", FormatSize(GC.GetTotalMemory(false))),
+            new KeyValuePair<string, string>("Process Memory", FormatSize(process.WorkingSet64)),
+            new KeyValuePair<string, string>("Total Available", FormatSize(gc.TotalAvailableMemoryBytes)),
+            new KeyValuePair<string, string>("GC Counts", $"Gen0: {GC.CollectionCount(0)} | Gen1: {GC.CollectionCount(1)} | Gen2: {GC.CollectionCount(2)}"),
         ];
     }
 }
