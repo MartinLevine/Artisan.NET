@@ -8,3 +8,7 @@ riderModule.iml
 # IDE
 .vscode
 .idea
+
+**/bin
+**/obj
+**.DotSettings.user

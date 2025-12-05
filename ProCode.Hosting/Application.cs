@@ -34,6 +34,6 @@ public class Application : IConfigurableApplication
 {
     public static void Main(string[] args)
     {
-        ArtisanApplication.Run(args);
+        ArtisanApplicationV2.Run<Application>(args);
     }
 }

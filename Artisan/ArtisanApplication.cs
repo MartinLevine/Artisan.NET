@@ -4,168 +4,206 @@ using Artisan.Attributes;
 using Artisan.Configuration;
 using Artisan.Core.Modules;
 using Artisan.DependencyInjection;
+using Artisan.Diagnostics;
+using Artisan.Extensions;
 using Artisan.Modules;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Mvc.ActionConstraints;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace Artisan;
 
-public class ArtisanApplication
+public class ArtisanApplicationV2
 {
-    private readonly string[] _args;
-    private Type _entryType;
-    private IConfigurableApplication? _appInstance;
-    private ArtisanOptions _options;
-    private WebApplicationBuilder _builder;
-    private ScanResult _scanResult;
-    private IEnumerable<ArtisanModule> _modules;
-    private ILogger _bootLogger;
-    
-    private ArtisanApplication(string[] args)
+    /// <summary>
+    /// 指定入口类型启动应用
+    /// </summary>
+    /// <param name="args">应用启动参数</param>
+    /// <typeparam name="TEntry">用户应用类</typeparam>
+    public static void Run<TEntry>(string[] args) where TEntry : class
     {
-        _args = args;
-        _options = new ArtisanOptions();
-        _modules = new List<ArtisanModule>();
-        // 初始化为空，稍后填充
-        _entryType = null!; 
-        _builder = null!;
-        _scanResult = null!;
+        new ArtisanApplicationV2(typeof(TEntry), args)
+            .Boot()
+            .GetAwaiter()
+            .GetResult();
     }
-    
-    // === 3. 静态入口 (对外 API 保持不变) ===
-    public static void Run(string[] args) => RunAsync(args).GetAwaiter().GetResult();
 
-    public static async Task RunAsync(string[] args)
+    /// <summary>
+    /// 封装启动参数
+    /// </summary>
+    private class ArtisanBuildContext
     {
-        // 这里就是你说的：实例化 -> 执行
-        var bootstrapper = new ArtisanApplication(args);
-        await bootstrapper.StartAsync();
+        public required Type EntryType { get; init; }
+
+        public required IConfigurableApplication? AppInstance { get; init; }
+
+        public required WebApplicationBuilder Builder { get; init; }
+
+        public required ArtisanOptions Options { get; init; }
+
+        public required ScanResult ScanResult { get; init; }
+
+        public required IEnumerable<ArtisanModule> LoadedModules { get; init; }
     }
-    
-    // === 4. 核心启动流程 (流水线) ===
-    private async Task StartAsync()
+
+    private readonly ArtisanBuildContext _context;
+    private readonly ILogger _logger;
+
+    private ArtisanApplicationV2(Type entryType, string[] args)
     {
-        // 步骤 1: 准备环境 (找到入口，实例化用户类，加载配置)
-        PrepareEnvironment();
-
-        // 步骤 2: 扫描程序集 (一次性扫描所有)
-        ScanAssemblies();
-
-        // 步骤 3: 初始化 Builder
-        CreateBuilder();
-
-        // 步骤 4: 加载模块 & 注册服务 (DI 阶段)
-        RegisterServices();
-
-        // 步骤 5: 构建应用
-        var app = _builder.Build();
-
-        // 步骤 6: 配置管道 (Middleware 阶段)
-        ConfigurePipeline(app);
-
-        // 步骤 7: 启动
-        await app.RunAsync();
+        _logger = InitializeLogger(args);
+        _context = BuildContext(entryType, args);
     }
-    
-    // === 5. 各个步骤的具体实现 (拆得更细了) ===
 
-    private void PrepareEnvironment()
+    private ILogger InitializeLogger(string[] args)
     {
-        // 1. 找入口
-        _entryType = FindEntryType();
-        
-        // 2. 实例化用户的 Application 类 (如果有的话)
-        if (typeof(IConfigurableApplication).IsAssignableFrom(_entryType))
+        // 1. 初始化全局日志 (这里可以简单的解析一下 args 看看有没有 --debug)
+        var logLevel = args.Contains("--debug") ? LogLevel.Debug : LogLevel.Information;
+        ArtisanBootLogger.Initialize(logLevel);
+        return ArtisanBootLogger.GetLogger<ArtisanApplicationV2>();
+    }
+
+    private ArtisanBuildContext BuildContext(Type entryType, string[] args)
+    {
+        // 初始化APP实例
+        IConfigurableApplication? app = null;
+
+        if (typeof(IConfigurableApplication).IsAssignableFrom(entryType))
         {
-            _appInstance = Activator.CreateInstance(_entryType) as IConfigurableApplication;
-        }
-
-        // 3. 执行阶段 1 配置 (Pre-Config)
-        _appInstance?.ConfigureArtisan(_options);
-    }
-    
-    private void ScanAssemblies()
-    {
-        // 使用之前设计的单次扫描器
-        var scanner = new AssemblyScanner();
-        // 如果有 ScanAssembly 特性，可以从 _entryType 上获取并传给 Scanner
-        _scanResult = scanner.Scan(_entryType);
-    }
-
-    private void CreateBuilder()
-    {
-        _builder = WebApplication.CreateBuilder(_args);
-    }
-    
-    private void RegisterServices()
-    {
-        // 1. 处理 MVC Controllers
-        var mvcBuilder = _builder.Services.AddControllers();
-        foreach (var asm in _scanResult.ControllerAssemblies)
-        {
-            mvcBuilder.AddApplicationPart(asm);
-        }
-
-        // 2. 加载模块 (逻辑)
-        var loader = new ModuleLoader(_options.DisabledModules);
-        _modules = loader.LoadModulesFromTypes(_scanResult.Modules, _builder.Configuration);
-
-        // 3. 注册扫描到的 Services/Repositories
-        ServiceRegistrar.RegisterTypes(_builder.Services, _scanResult.Injectables);
-        
-        // 4. 注册 Configuration
-        ConfigRegistrar.RegisterTypes(_builder.Services, _builder.Configuration, _scanResult.Configurations);
-
-        // 5. 执行模块的 ConfigureServices
-        foreach (var module in _modules)
-        {
-            module.ConfigureServices(_builder.Services);
-        }
-
-        // 6. 执行用户的 ConfigureServices (特权覆盖)
-        _appInstance?.ConfigureServices(_builder.Services);
-    }
-    
-    private void ConfigurePipeline(WebApplication app)
-    {
-        // 1. 用户自定义管道 (最优先)
-        _appInstance?.Configure(app);
-
-        // 2. 模块管道
-        foreach (var module in _modules)
-        {
-            module.Configure(app);
-        }
-    }
-
-    private Type FindEntryType()
-    {
-        var stackTrace = new StackTrace();
-        foreach (var frame in stackTrace.GetFrames())
-        {
-            var method = frame.GetMethod();
-            if (method?.Name == "Main" && method.DeclaringType != null)
+            try
             {
-                if (method.DeclaringType.GetCustomAttribute<ArtisanApplicationAttribute>() != null)
-                {
-                    return method.DeclaringType;
-                }
+                // 只有实现了接口才实例化
+                app = Activator.CreateInstance(entryType) as IConfigurableApplication;
+            }
+            catch (Exception ex)
+            {
+                // 用户可能忘了把构造函数设为 public
+                throw new InvalidOperationException(
+                    $"入口类 '{entryType.Name}' 实现了 IConfigurableApplication，但无法实例化。请确保它有一个无参的 public 构造函数。", ex);
             }
         }
 
-        // 备选方案：查找入口程序集中的 ArtisanApplication 类
-        var entryAssembly = Assembly.GetEntryAssembly();
-        if (entryAssembly != null)
+        // 初始化扫描依赖
+        var builder = WebApplication.CreateBuilder(args);
+        var options = new ArtisanOptions();
+        var scanResult = new AssemblyScanner().Scan(entryType);
+
+        // 处理用户配置
+        app?.ConfigureArtisan(options);
+        var loader = new ModuleLoader(options.DisabledModules);
+        var modules = loader.LoadModulesFromTypes(scanResult.Modules, builder.Configuration);
+        
+        // 清理容器内部的Logger依赖，防止内部日志无法打印的问题
+        
+
+        return new ArtisanBuildContext()
         {
-            var entryType = entryAssembly.GetTypes()
-                .FirstOrDefault(t => t.GetCustomAttribute<ArtisanApplicationAttribute>() != null);
-            if (entryType != null)
-                return entryType;
+            EntryType = entryType,
+            AppInstance = app,
+            Options = options,
+            ScanResult = scanResult,
+            Builder = builder,
+            LoadedModules = modules
+        };
+    }
+
+    /// <summary>
+    /// 处理应用启动流程
+    /// </summary>
+    public async Task Boot()
+    {
+        _logger.LogInformation("Starting Artisan Application...");
+        ProcessControllers();
+        ProcessInjectables();
+        ProcessConfigurations();
+        ProcessConfigureServices();
+        await RunApplication();
+    }
+
+    /// <summary>
+    /// 处理控制器
+    /// </summary>
+    private void ProcessControllers()
+    {
+        _logger.LogInformation("Artisan is processing controllers...");
+        var mvcBuilder = _context.Builder.Services.AddControllers();
+        var asms = _context.ScanResult.ControllerAssemblies;
+
+        foreach (var asm in asms)
+        {
+            mvcBuilder.AddApplicationPart(asm);
+        }
+    }
+
+    /// <summary>
+    /// 处理依赖
+    /// </summary>
+    private void ProcessInjectables()
+    {
+        _logger.LogInformation("Artisan is processing injectables...");
+        ServiceRegistrar.RegisterTypes(
+            _context.Builder.Services,
+            _context.ScanResult.Injectables);
+    }
+
+    /// <summary>
+    /// 处理配置项依赖
+    /// </summary>
+    private void ProcessConfigurations()
+    {
+        _logger.LogInformation("Artisan is processing configurations...");
+        ConfigRegistrar.RegisterTypes(
+            _context.Builder.Services,
+            _context.Builder.Configuration,
+            _context.ScanResult.Configurations);
+    }
+
+    /// <summary>
+    /// 处理.net配置管道
+    /// </summary>
+    private void ProcessConfigureServices()
+    {
+        _logger.LogInformation("Artisan is processing web configurations...");
+        foreach (var module in _context.LoadedModules)
+        {
+            module.ConfigureServices(_context.Builder.Services);
         }
 
-        throw new InvalidOperationException(
-            "Cannot find entry type with [ArtisanApplication] attribute. " +
-            "Make sure your application class is decorated with [ArtisanApplication].");
+        // 执行用户的 ConfigureServices (特权覆盖)
+        _context.AppInstance?.ConfigureServices(_context.Builder.Services);
+    }
+
+    /// <summary>
+    /// 运行App
+    /// </summary>
+    private async Task RunApplication()
+    {
+        _logger.LogInformation("Artisan is building and running web application...");
+        var app = _context.Builder.Build();
+
+        // 处理用户管道
+        _context.AppInstance?.Configure(app);
+
+        // 处理模块管道
+        foreach (var module in _context.LoadedModules)
+        {
+            module.Configure(app);
+        }
+
+        _logger.LogInformation("Artisan finding API endpoints:");
+        var endpoints = app.GetEndpoints();
+        _logger.LogTable(endpoints, table =>
+        {
+            table
+                .AddColumn("Method", x => x.ActionConstraints?
+                    .OfType<HttpMethodActionConstraint>()
+                    .FirstOrDefault()?.HttpMethods.First() ?? "ANY")
+                .AddColumn("Route Pattern", x => x.AttributeRouteInfo?.Template ?? "N/A")
+                .AddColumn("Controller", x => x.ControllerName)
+                .AddColumn("Action", x => x.ActionName);
+        });
+
+        await app.RunAsync();
     }
 }
