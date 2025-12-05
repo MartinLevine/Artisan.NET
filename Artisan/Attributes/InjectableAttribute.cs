@@ -2,9 +2,6 @@ using Artisan.DependencyInjection;
 
 namespace Artisan.Attributes;
 
-/// <summary>
-/// 标记一个类可以被注入到 DI 容器
-/// </summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = false)]
 public class InjectableAttribute : Attribute
 {

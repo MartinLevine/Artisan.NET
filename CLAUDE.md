@@ -2,134 +2,167 @@
 
 ## 项目概述
 
-ProCode-Server 是一个基于 .NET 10 的后端服务项目，核心包含 **Artisan.NET** 框架 —— 一个类似 Spring Boot 的依赖注入框架，旨在提供"极简、快速接入、最少样板代码、所引即所得"的开发体验。
+这是一个基于 .NET 10 的 Web 服务端项目，核心是 **Artisan** 框架 —— 一个类似 Spring Boot 的依赖注入框架，提供自动扫描、模块化架构和声明式服务注册能力。
+
+## 技术栈
+
+- **运行时**: .NET 10.0
+- **框架**: ASP.NET Core + Artisan (自研 DI 框架)
+- **IDE**: JetBrains Rider
+- **解决方案格式**: .slnx (新格式)
 
 ## 项目结构
 
 ```
 ProCode-Server/
-├── Artisan/                    # Artisan.NET 核心框架
-│   ├── Application/            # 应用启动器
-│   ├── Attributes/             # 所有 Attributes
-│   ├── Configuration/          # 配置系统
-│   ├── DependencyInjection/    # DI 核心
+├── Artisan/                    # 核心框架库
+│   ├── Attributes/             # 特性标注
+│   │   ├── ArtisanApplicationAttribute.cs   # 应用入口标记
+│   │   ├── InjectableAttribute.cs           # 可注入组件基类
+│   │   ├── ServiceAttribute.cs              # 服务层组件
+│   │   ├── ConfigurationAttribute.cs        # 配置绑定
+│   │   ├── ModuleAttribute.cs               # 模块标记
+│   │   └── ScanAssemblyAttribute.cs         # 程序集扫描
+│   ├── DependencyInjection/    # 依赖注入核心
+│   │   ├── AssemblyScanner.cs               # 程序集扫描器
+│   │   ├── ServiceRegistrar.cs              # 服务注册器
+│   │   ├── Lifetime.cs                      # 生命周期枚举
+│   │   └── AssemblyHelper.cs                # 程序集辅助
 │   ├── Modules/                # 模块系统
-│   └── Session/                # Session 生命周期
-├── api-gateway/                # API 网关服务
-├── docs/                       # 设计文档
-│   ├── feature-dependency-injection.md  # DI 框架设计文档
-│   └── feature-aop.md                   # AOP 设计文档（待实现）
-└── compose.yaml                # Docker Compose 配置
+│   │   ├── ArtisanModule.cs                 # 模块基类
+│   │   ├── ModuleLoader.cs                  # 模块加载器
+│   │   └── ModuleLevel.cs                   # 模块级别
+│   ├── Configuration/          # 配置系统
+│   │   └── ConfigRegistrar.cs               # 配置注册器
+│   ├── ArtisanApplication.cs   # 应用启动入口
+│   ├── ArtisanOptions.cs       # 框架配置选项
+│   └── IConfigurableApplication.cs  # 可配置应用接口
+├── ProCode.Hosting/            # 宿主应用 (示例项目)
+│   ├── Application.cs          # 应用入口
+│   ├── Controllers/            # API 控制器
+│   └── Models/                 # 数据模型
+├── api-gateway/                # API 网关 (预留)
+└── docs/                       # 文档目录
 ```
 
-## 技术栈
+## 构建与运行
 
-- **.NET 10** (Preview)
-- **ASP.NET Core** Web API
-- **Docker** 容器化支持
-
-## 核心概念
-
-### Artisan.NET 框架
-
-核心理念："所引即所得" —— 用户只需在 `.csproj` 中引用 NuGet 包或项目，框架自动发现并加载对应模块。
-
-#### 主要 Attributes
-
-| Attribute | 用途 | 默认生命周期 |
-|-----------|------|-------------|
-| `[ArtisanApplication]` | 应用入口 | - |
-| `[Service]` | 服务层组件 | Scoped |
-| `[Repository]` | 数据访问层 | Scoped |
-| `[Component]` | 通用组件 | Singleton |
-| `[Inject]` | 属性/字段注入 | - |
-| `[Module]` | 模块配置 | - |
-| `[AppSetting]` | 配置类映射 | - |
-
-#### 模块层级
-
-```csharp
-public enum ModuleLevel
-{
-    Kernel = 0,          // 核心底座
-    Infrastructure = 10, // 基础设施
-    Application = 20,    // 业务模块
-    Presentation = 100   // 顶层入口
-}
-```
-
-## 常用命令
-
-### 构建项目
 ```bash
+# 构建项目
 dotnet build
-```
 
-### 运行 API Gateway
-```bash
-dotnet run --project api-gateway
-```
+# 运行应用
+dotnet run --project ProCode.Hosting
 
-### 运行测试
-```bash
+# 运行测试
 dotnet test
 ```
 
-### Docker 构建
-```bash
-docker compose build
+## Artisan 框架核心概念
+
+### 1. 应用入口
+
+使用 `[ArtisanApplication]` 标记应用入口类：
+
+```csharp
+[ArtisanApplication]
+public class Application : IConfigurableApplication
+{
+    public static void Main(string[] args)
+    {
+        ArtisanApplication.Run(args);
+    }
+}
 ```
 
-### Docker 运行
-```bash
-docker compose up
+### 2. 依赖注入
+
+使用 `[Injectable]` 或 `[Service]` 等特性自动注册服务：
+
+```csharp
+[Service]  // 默认 Scoped 生命周期
+public class UserService : IUserService
+{
+    // 自动注册为 IUserService 和 UserService
+}
+
+[Injectable(Lifetime = Lifetime.Singleton)]
+public class CacheService
+{
+    // 单例服务
+}
 ```
 
-## 开发规范
+**生命周期选项**:
+- `Transient` - 每次注入创建新实例
+- `Scoped` - 每个请求一个实例
+- `Singleton` - 全局单例
 
-### 代码风格
+### 3. 模块系统
 
-- 使用 C# 12+ 特性
-- 启用 nullable reference types
-- 使用文件范围命名空间
-- 优先使用 primary constructors
+继承 `ArtisanModule` 创建功能模块：
 
-### 命名约定
+```csharp
+[Module]
+public class MyModule : ArtisanModule
+{
+    public override void ConfigureServices(IServiceCollection services)
+    {
+        // 注册服务
+    }
 
-- **接口**: `I` 前缀，如 `IUserService`
-- **Attribute**: `Attribute` 后缀，如 `ServiceAttribute`
-- **异常**: `Exception` 后缀，如 `CircularDependencyException`
+    public override void Configure(WebApplication app)
+    {
+        // 配置中间件
+    }
+}
+```
 
-### 依赖注入
+### 4. 配置绑定
 
-- 优先使用构造函数注入
-- 属性注入使用 `[Inject]` 标记
-- 配置类使用 `[AppSetting]` 标记
+使用 `[Configuration]` 自动绑定配置节：
 
-## 设计文档
+```csharp
+[Configuration("Database")]
+public class DatabaseConfig
+{
+    public string ConnectionString { get; set; }
+    public int Timeout { get; set; }
+}
+```
 
-实现新功能前，请先：
+### 5. 应用配置接口
 
-1. 阅读相关设计文档（`docs/` 目录）
-2. 如无现有设计，创建 `docs/feature-<功能名>.md`
-3. 设计文档需包含：
-   - 核心原理
-   - 实现步骤
-   - 需要修改/创建/删除的文件
-   - 核心实现代码
-4. 等待确认后再实施
+实现 `IConfigurableApplication` 参与框架配置流程：
+
+```csharp
+public interface IConfigurableApplication
+{
+    void ConfigureArtisan(ArtisanOptions options);    // 阶段1: 框架预配置
+    void ConfigureServices(IServiceCollection services); // 阶段2: 服务注册
+    void Configure(WebApplication app);               // 阶段3: 中间件配置
+}
+```
+
+## 启动流程
+
+1. **PrepareEnvironment** - 找到入口类型，实例化用户 Application
+2. **ScanAssemblies** - BFS 扫描所有相关程序集
+3. **CreateBuilder** - 创建 WebApplicationBuilder
+4. **RegisterServices** - 加载模块，注册服务和配置
+5. **Build** - 构建 WebApplication
+6. **ConfigurePipeline** - 配置中间件管道
+7. **Run** - 启动应用
+
+## 代码规范
+
+- 使用 C# 最新语法特性 (file-scoped namespace, primary constructor 等)
+- 启用 Nullable Reference Types
+- 使用 Implicit Usings
+- 遵循 .NET 命名约定
 
 ## 注意事项
 
-- 修改 Artisan 框架核心代码前，需充分理解现有设计
-- 模块系统基于程序集引用自动推导依赖关系
-- AOP 功能目前为后续迭代计划，暂未实现
-- 确保新功能与现有 "所引即所得" 设计理念一致
-
-## 技术选型规则
-
-**重要**：涉及第三方库/NuGet 包选型决策时：
-1. 不要自行决定使用哪个库
-2. 在设计文档中列出候选方案
-3. 等待用户调研完成后给出最终选择
-4. 用户确认后再更新设计文档并实施
+- `api-gateway` 目录当前为预留模块，暂无实际代码
+- 框架设计参考 Spring Boot，但保持 .NET 生态惯例
+- 模块加载支持条件判断 (`ShouldLoad`) 和依赖声明 (`DependsOn`)

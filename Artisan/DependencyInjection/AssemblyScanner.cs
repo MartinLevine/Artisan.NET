@@ -1,236 +1,151 @@
 using System.Reflection;
+using Artisan.Attributes;
+using Artisan.Modules;
+using Microsoft.AspNetCore.Mvc;
 
-namespace Artisan.DependencyInjection;
-
-/// <summary>
-/// 程序集扫描器
-/// 负责发现和扫描应用程序集及其引用的程序集
-/// </summary>
-public class AssemblyScanner : IAssemblyScanner
+namespace Artisan.DependencyInjection
 {
-    private readonly List<Assembly> _scannedAssemblies = new();
-    private readonly List<Type> _scannedTypes = new();
-    private readonly HashSet<string> _processedAssemblies = new();
-
-    /// <inheritdoc />
-    public IReadOnlyList<Assembly> ScannedAssemblies => _scannedAssemblies;
-
-    /// <inheritdoc />
-    public IReadOnlyList<Type> ScannedTypes => _scannedTypes;
-
-    /// <inheritdoc />
-    public void Scan(Assembly entryAssembly, IEnumerable<string>? additionalPatterns = null)
+    public class ScanResult
     {
-        _scannedAssemblies.Clear();
-        _scannedTypes.Clear();
-        _processedAssemblies.Clear();
+        // 所有的 Module 类型
+        public List<Type> Modules { get; } = [];
 
-        // 获取入口程序集的根命名空间
-        var rootNamespace = GetRootNamespace(entryAssembly);
-        var patterns = new List<string>();
+        // 所有的 Service/Repository/Component 类型
+        public List<Type> Injectables { get; } = [];
 
-        if (!string.IsNullOrEmpty(rootNamespace))
-        {
-            // 添加入口程序集命名空间及其子命名空间
-            patterns.Add($"{rootNamespace}.**");
-        }
+        // 所有的 Controller 类型 (或者包含 Controller 的程序集)
+        public HashSet<Assembly> ControllerAssemblies { get; } = [];
 
-        // 添加 Artisan 框架命名空间
-        patterns.Add("Artisan.**");
-
-        // 添加额外的匹配模式
-        if (additionalPatterns != null)
-        {
-            patterns.AddRange(additionalPatterns);
-        }
-
-        // 递归扫描入口程序集及其引用
-        ScanAssemblyRecursive(entryAssembly, patterns);
+        // 所有的 配置绑定 类型
+        public List<Type> Configurations { get; } = [];
     }
 
-    /// <summary>
-    /// 递归扫描程序集及其引用
-    /// </summary>
-    private void ScanAssemblyRecursive(Assembly assembly, List<string> patterns)
+    public class AssemblyScanner
     {
-        var assemblyName = assembly.GetName().Name;
-
-        if (assemblyName == null || _processedAssemblies.Contains(assemblyName))
-            return;
-
-        // 跳过系统程序集
-        if (IsSystemAssembly(assemblyName))
-            return;
-
-        // 检查程序集是否匹配任一模式
-        if (!ShouldScanAssembly(assemblyName, patterns))
-            return;
-
-        _processedAssemblies.Add(assemblyName);
-        _scannedAssemblies.Add(assembly);
-
-        // 扫描程序集中的类型
-        try
+        public ScanResult Scan(Type entryType)
         {
-            var types = assembly.GetTypes()
-                .Where(t => t.IsClass && !t.IsAbstract && t.IsPublic);
+            var result = new ScanResult();
+
+            // 1. 初始化队列，包含入口程序集
+            var pendingAssemblies = new Queue<Assembly>();
+            var visitedAssemblies = new HashSet<string>();
+
+            // 添加入口
+            pendingAssemblies.Enqueue(entryType.Assembly);
+
+            // 添加 [ScanAssembly] 指定的额外程序集
+            var extraPatterns = entryType.GetCustomAttributes<ScanAssemblyAttribute>();
+            foreach (var pattern in extraPatterns)
+            {
+                // 假设这里有个 Helper 能根据 glob 加载程序集
+                var asms = AssemblyHelper.LoadFromPattern(pattern.Pattern);
+                foreach (var asm in asms) pendingAssemblies.Enqueue(asm);
+            }
+
+            // 2. 开始广度优先搜索 (BFS)
+            while (pendingAssemblies.Count > 0)
+            {
+                var assembly = pendingAssemblies.Dequeue();
+                var asmName = assembly.GetName().Name!;
+
+                // 去重
+                if (!visitedAssemblies.Add(asmName)) continue;
+
+                // 核心优化：跳过系统程序集，极大提升性能
+                if (IsSystemAssembly(asmName)) continue;
+
+                // ==========================================
+                // 核心优化：在这个循环里完成所有类型的分类
+                // ==========================================
+                ProcessAssemblyTypes(assembly, result);
+
+                // 3. 将引用的程序集加入队列 (递归)
+                foreach (var refName in assembly.GetReferencedAssemblies())
+                {
+                    if (IsSystemAssembly(refName.Name) || visitedAssemblies.Contains(refName.Name!))
+                        continue;
+
+                    try
+                    {
+                        // 只有当引用的是相关业务集时才加载
+                        // 这里可以加个前缀判断优化，比如只加载 "Artisan.*" 或 "MyApp.*"
+                        var refAsm = Assembly.Load(refName);
+                        pendingAssemblies.Enqueue(refAsm);
+                    }
+                    catch
+                    {
+                        // 忽略加载失败 (可能是环境缺失)
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private void ProcessAssemblyTypes(Assembly assembly, ScanResult result)
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types.Where(t => t != null).ToArray()!;
+            }
+
+            bool hasController = false;
 
             foreach (var type in types)
             {
-                if (ShouldIncludeType(type, patterns))
+                if (type.IsAbstract || type.IsInterface) continue;
+
+                // A. 识别 Module
+                if (typeof(ArtisanModule).IsAssignableFrom(type))
                 {
-                    _scannedTypes.Add(type);
+                    result.Modules.Add(type);
+                }
+                // B. 识别 Service/Repository/Component
+                else if (type.IsDefined(typeof(InjectableAttribute), true))
+                {
+                    result.Injectables.Add(type);
+                }
+                // C. 识别 Configuration
+                else if (type.IsDefined(typeof(ConfigurationAttribute), true))
+                {
+                    result.Configurations.Add(type);
+                }
+                // D. 识别 Controller (原生 ControllerBase 或 [ApiController])
+                // 这里我们不需要记录具体 Type，只需要标记 Assembly 给 MVC 用
+                else if (!hasController && IsController(type))
+                {
+                    hasController = true;
                 }
             }
+
+            if (hasController)
+            {
+                result.ControllerAssemblies.Add(assembly);
+            }
         }
-        catch (ReflectionTypeLoadException ex)
+
+        /// <summary>
+        /// 需要过滤的系统程序集
+        /// </summary>
+        private bool IsSystemAssembly(string? name)
         {
-            // 处理类型加载异常，只添加能加载的类型
-            var loadedTypes = ex.Types.Where(t => t != null && t.IsClass && !t.IsAbstract && t.IsPublic);
-            foreach (var type in loadedTypes)
-            {
-                if (ShouldIncludeType(type!, patterns))
-                {
-                    _scannedTypes.Add(type!);
-                }
-            }
+            if (string.IsNullOrEmpty(name)) return false;
+            return name.StartsWith("System")
+                   || name.StartsWith("Microsoft")
+                   || name.StartsWith("mscorlib")
+                   || name.StartsWith("Newtonsoft");
         }
 
-        // 递归扫描引用的程序集
-        foreach (var referencedAssemblyName in assembly.GetReferencedAssemblies())
+        private bool IsController(Type type)
         {
-            if (IsSystemAssembly(referencedAssemblyName.Name))
-                continue;
-
-            try
-            {
-                var referencedAssembly = Assembly.Load(referencedAssemblyName);
-                ScanAssemblyRecursive(referencedAssembly, patterns);
-            }
-            catch (Exception)
-            {
-                // 忽略无法加载的程序集
-            }
-        }
-    }
-
-    /// <summary>
-    /// 检查程序集是否应该被扫描
-    /// </summary>
-    private bool ShouldScanAssembly(string? assemblyName, List<string> patterns)
-    {
-        if (string.IsNullOrEmpty(assemblyName))
+            if (type.Name.EndsWith("Controller")) return true;
+            if (type.IsDefined(typeof(ApiControllerAttribute), true)) return true;
             return false;
-
-        // 检查是否匹配任一模式
-        foreach (var pattern in patterns)
-        {
-            if (GlobMatcher.IsMatch(pattern, assemblyName))
-                return true;
         }
-
-        return false;
-    }
-
-    /// <summary>
-    /// 检查类型是否应该被包含
-    /// </summary>
-    private bool ShouldIncludeType(Type type, List<string> patterns)
-    {
-        var typeNamespace = type.Namespace;
-        if (string.IsNullOrEmpty(typeNamespace))
-            return false;
-
-        foreach (var pattern in patterns)
-        {
-            if (GlobMatcher.IsMatch(pattern, typeNamespace))
-                return true;
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// 检查是否是系统程序集
-    /// </summary>
-    private static bool IsSystemAssembly(string? assemblyName)
-    {
-        if (string.IsNullOrEmpty(assemblyName))
-            return true;
-
-        return assemblyName.StartsWith("System", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("netstandard", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("mscorlib", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("WindowsBase", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("PresentationCore", StringComparison.OrdinalIgnoreCase)
-               || assemblyName.StartsWith("PresentationFramework", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// 获取程序集的根命名空间
-    /// </summary>
-    private static string? GetRootNamespace(Assembly assembly)
-    {
-        // 优先从程序集中的类型获取公共命名空间前缀
-        // 这比使用程序集名称更可靠，因为程序集名称可能与命名空间不同
-        // 例如：程序集 "api-gateway" 的命名空间可能是 "api_gateway"
-        try
-        {
-            var namespaces = assembly.GetTypes()
-                .Where(t => !string.IsNullOrEmpty(t.Namespace) && t.IsPublic)
-                .Select(t => t.Namespace!)
-                .Distinct()
-                .ToList();
-
-            if (namespaces.Count > 0)
-            {
-                // 找到最短的公共命名空间前缀
-                var commonPrefix = namespaces
-                    .OrderBy(n => n.Length)
-                    .First()
-                    .Split('.')
-                    .First();
-
-                // 验证这个前缀确实是所有命名空间的公共前缀
-                if (namespaces.All(n => n.StartsWith(commonPrefix, StringComparison.Ordinal)))
-                {
-                    return commonPrefix;
-                }
-
-                // 如果没有公共前缀，返回最短命名空间的第一部分
-                return commonPrefix;
-            }
-        }
-        catch
-        {
-            // 忽略反射异常
-        }
-
-        // 备选方案：使用程序集名称
-        var assemblyName = assembly.GetName().Name;
-        if (!string.IsNullOrEmpty(assemblyName))
-            return assemblyName;
-
-        return null;
-    }
-
-    /// <inheritdoc />
-    public IEnumerable<Type> GetTypesWithAttribute<TAttribute>() where TAttribute : Attribute
-    {
-        return _scannedTypes.Where(t => t.GetCustomAttribute<TAttribute>() != null);
-    }
-
-    /// <inheritdoc />
-    public IEnumerable<Type> GetTypesAssignableTo<TBase>()
-    {
-        return GetTypesAssignableTo(typeof(TBase));
-    }
-
-    /// <inheritdoc />
-    public IEnumerable<Type> GetTypesAssignableTo(Type baseType)
-    {
-        return _scannedTypes.Where(t =>
-            baseType.IsAssignableFrom(t) && t != baseType);
     }
 }

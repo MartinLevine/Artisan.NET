@@ -1,21 +1,21 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Artisan.Modules;
 
-/// <summary>
-/// 模块基类
-/// </summary>
 public abstract class ArtisanModule
 {
-    /// <summary>
-    /// 配置服务（对应 builder.Services.AddXxx）
-    /// 通过构造函数注入配置类（使用 [AppSetting] 标记的类）
-    /// </summary>
-    public virtual void ConfigureServices(IServiceCollection services) { }
+    // 钩子：是否应该加载此模块 (用于条件加载)
+    public virtual bool ShouldLoad(IConfiguration configuration) => true;
 
-    /// <summary>
-    /// 配置中间件（对应 app.UseXxx）
-    /// </summary>
-    public virtual void Configure(WebApplication app) { }
+    // 钩子：注册服务
+    public virtual void ConfigureServices(IServiceCollection services)
+    {
+    }
+
+    // 钩子：配置中间件
+    public virtual void Configure(WebApplication app)
+    {
+    }
 }
