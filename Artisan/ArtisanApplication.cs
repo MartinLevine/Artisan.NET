@@ -1,6 +1,3 @@
-using System.Diagnostics;
-using System.Reflection;
-using Artisan.Attributes;
 using Artisan.Configuration;
 using Artisan.Core.Modules;
 using Artisan.DependencyInjection;
@@ -93,11 +90,14 @@ public class ArtisanApplicationV2
         app?.ConfigureArtisan(options);
         var loader = new ModuleLoader(options.DisabledModules);
         var modules = loader.LoadModulesFromTypes(scanResult.Modules, builder.Configuration);
-        
-        // 清理容器内部的Logger依赖，防止内部日志无法打印的问题
-        
 
-        return new ArtisanBuildContext()
+        // fix: 内部日志无法打印的问题
+        // 清理容器内部的Logger依赖
+        builder.Logging.ClearProviders();
+        // 替换日志工厂
+        builder.Services.AddSingleton<ILoggerFactory>(_ => ArtisanBootLogger.Factory);
+
+        return new ArtisanBuildContext
         {
             EntryType = entryType,
             AppInstance = app,
@@ -113,12 +113,29 @@ public class ArtisanApplicationV2
     /// </summary>
     public async Task Boot()
     {
-        _logger.LogInformation("Starting Artisan Application...");
+        ProcessBootstrapLogging();
         ProcessControllers();
         ProcessInjectables();
         ProcessConfigurations();
         ProcessConfigureServices();
         await RunApplication();
+    }
+
+    private void ProcessBootstrapLogging()
+    {
+        // 1. (可选) 打印一个帅气的 ASCII Banner
+        // 你可以使用 http://patorjk.com/software/taag/ 生成
+        var banner = """
+                           _   ___  _____ ___ ___   _   _  _ 
+                          /_\ | _ \|_   _|_ _/ __| /_\ | \| |
+                         / _ \|   /  | |  | |\__ \/ _ \| .` |
+                        /_/ \_\_|_\  |_| |___|___/_/ \_\_|\_|  Artisan.NET
+                     """;
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine(banner);
+        Console.ResetColor();
+        Console.WriteLine();
+        _logger.LogInformation("Starting Artisan Application...");
     }
 
     /// <summary>
@@ -190,8 +207,17 @@ public class ArtisanApplicationV2
         {
             module.Configure(app);
         }
+        
+        // 打印输出环境信息
+        var infos = app.GetRuntimeInformation();
+        _logger.LogInformation("Runtime Environment:");
+        _logger.LogTable(infos, table =>
+        {
+            table.AddColumn("Item", x => x.Key)
+                .AddColumn("Value", x => x.Value);
+        });
 
-        _logger.LogInformation("Artisan finding API endpoints:");
+        _logger.LogInformation("API endpoints:");
         var endpoints = app.GetEndpoints();
         _logger.LogTable(endpoints, table =>
         {

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
@@ -29,5 +30,21 @@ public static class WebApplicationExtensions
             .OrderBy(x => x.ControllerName)
             .ThenBy(x => x.AttributeRouteInfo?.Template ?? "N/A")
             .ToList();
+    }
+
+    public static IEnumerable<KeyValuePair<string, string>> GetRuntimeInformation(this WebApplication app)
+    {
+        var process = System.Diagnostics.Process.GetCurrentProcess();
+        return
+        [
+            new KeyValuePair<string, string>("Application", app.Environment.ApplicationName),
+            new KeyValuePair<string, string>("Environment", app.Environment.EnvironmentName),
+            new KeyValuePair<string, string>("Content Root", app.Environment.ContentRootPath),
+            new KeyValuePair<string, string>("Framework", RuntimeInformation.FrameworkDescription),
+            new KeyValuePair<string, string>("OS Platform", RuntimeInformation.OSDescription),
+            new KeyValuePair<string, string>("Process ID", process.Id.ToString()),
+            new KeyValuePair<string, string>("Memory Usage", $"{process.WorkingSet64 / 1024 / 1024} MB"),
+            new KeyValuePair<string, string>("Timezone", TimeZoneInfo.Local.DisplayName)
+        ];
     }
 }

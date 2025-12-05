@@ -14,7 +14,7 @@ public static class ArtisanBootLogger
     /// <summary>
     /// 获取底层的 ILoggerFactory (如果需要高级操作)
     /// </summary>
-    private static ILoggerFactory Factory => _factory ??= new NullLoggerFactory();
+    public static ILoggerFactory Factory => _factory ??= new NullLoggerFactory();
 
     /// <summary>
     /// 初始化日志系统 (仅限框架入口调用)

@@ -10,7 +10,6 @@ public class AppModule : ArtisanModule
     public override void ConfigureServices(IServiceCollection services)
     {
         base.ConfigureServices(services);
-        services.AddControllers();
         services.AddOpenApi();
     }
 
@@ -24,8 +23,6 @@ public class AppModule : ArtisanModule
         }
         app.UseHttpsRedirection();
         app.UseAuthorization();
-        app.MapControllers();
-        app.Run();
     }
 }
 

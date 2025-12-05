@@ -9,7 +9,7 @@ namespace Emm.API;
 [Module]
 public class EmmModule : ArtisanModule
 {
-    public override bool ShouldLoad(IConfiguration configuration) => false;
+    public override bool ShouldLoad(IConfiguration configuration) => true;
 
     public override void ConfigureServices(IServiceCollection services)
     {
